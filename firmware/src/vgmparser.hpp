@@ -1,6 +1,7 @@
-#include "filehandler.hpp"
+#include "vgm_data.h"
+#include <string.h>
 
-#define HEADER_U32(x) *(uint32_t*)(&header_data[x])
+#define HEADER_U32(x) *(uint32_t*)(header_data+x)
 
 //struct to unpack dual chip flag and clock from header
 typedef struct {
@@ -23,9 +24,6 @@ enum class VgmHeaderChip : byte {
 
 class VgmParser {
     private:
-        FileHandler* file;
-        Opl3Chip* opl3;
-        Saa1099Chip* saa1099;
         OpmChip* opm;
 
         uint16_t delayCycles = 0;
@@ -33,31 +31,30 @@ class VgmParser {
         uint32_t music_length = 0;
         uint32_t loopOffset = 0;
         uint32_t headerSize = 0;
-        byte header_data[0xff];
+        byte header_data[256];
 
         DualChipClk* getHeaderClock(byte offset) {
+            printf("header_data %08x\n", header_data);
+            printf("offset %08x\n", offset);
             if (offset > headerSize) return 0;
-            else return (DualChipClk*)(&header_data[offset]);
+            else return (DualChipClk*)(header_data+offset);
         }
 
     public:
-        VgmParser(FileHandler* _fileHandler, Opl3Chip* _opl3, Saa1099Chip* _saa1099) {
-            file = _fileHandler;
-            opl3 = _opl3;
-            saa1099 = _saa1099;
+        VgmParser() {
         }
+
+        uint32_t curr_ofs = 0;
 
         void tick();
 
         void readHeader() {
             printf("Reading 0xFF bytes from file and parsing header.\n");
-            file->rewind();
-            uint bytesRead = file->readIntoBuffer(header_data, 0xff);
-            printf("Read %X (%u) bytes.\n", bytesRead, bytesRead);
+            curr_ofs = 0;
+            memcpy(header_data, vgm_data, 256);
 
             music_length = HEADER_U32(0x4) + 4; //this is a relative offset instead of an absolute one because fuck you
             loopOffset = HEADER_U32(0x1c) + 0x1c; //ditto
-            
             //determining file start & header size
             if (getVersion() < 0x0150) {
                 startOffset = 0x40;
@@ -133,24 +130,24 @@ void VgmParser::tick() {
         delayCycles--;
         return;
     }
-
     //Parse VGM commands
     //Full command listing and VGM file spec: https://vgmrips.net/wiki/VGM_Specification
-    byte curByte = file->readByte();
+    byte curByte = vgm_data[curr_ofs++];
     switch (curByte) {
         case 0x4F: { //Game Gear PSG stereo register write
-            file->skip(1);
+            curr_ofs++;
             break;
         }
 
         //TODO: SN76489 stuff because of the tandy 3 voice sound
         case 0x50: { //SN76489/SN76496 write
-            file->skip(1);
+            curr_ofs++;
             break;
         }
 
         case 0x61: { //Wait x cycles
-            delayCycles = file->readU16();
+            delayCycles = vgm_data[curr_ofs++];
+            delayCycles |= (vgm_data[curr_ofs++] << 8);
             break;
         }
 
@@ -186,68 +183,20 @@ void VgmParser::tick() {
         }
 
         case 0x66: { //Loop
-            printf("%X: Got command 0x66. Looping back to offset 0x%X.\n", file->getPos(), loopOffset);
-            file->seek(loopOffset);
-            break;
-        }
-
-        //YMF262 stuff
-        case 0x5A: //YM3812 (OPL2)
-        case 0x5B: //YM3526 (OPL1)
-        case 0x5E: { //YMF262 port 0
-            byte regi = file->readByte();
-            byte data = file->readByte();
-
-            //send register
-            opl3->write(0, regi);
-            busy_wait_us_32(FM_WRITE_PULSE_US);
-            
-            //send data
-            opl3->write(1, data);
-            busy_wait_us_32(FM_WRITE_PULSE_US);
-
-            break;
-        }
-
-        case 0x5F: { //YMF262 port 1
-            byte regi = file->readByte();
-            byte data = file->readByte();
-
-            //send register
-            opl3->write(0b10, regi);
-            busy_wait_us_32(FM_WRITE_PULSE_US);
-            
-            //send data
-            opl3->write(0b11, data);
-            busy_wait_us_32(FM_WRITE_PULSE_US);
-
-            break;
-        }
-
-        //SAA1099 stuff
-        case 0xBD: { //SAA1099 write
-            byte regi = file->readByte();
-            byte data = file->readByte();
-
-            //figuring out which chip to write to
-            //bit 7: low = chip 1, high = chip 2
-            bool chip = (regi & BIT(7)) != 0;
-
-            //send register
-            saa1099->write(chip, true, regi);
-            busy_wait_us_32(SAA_WRITE_PULSE_US);
-            
-            //send data
-            saa1099->write(chip, false, data);
-            busy_wait_us_32(SAA_WRITE_PULSE_US);
-
+            if (loopOffset == 0x1c) {
+                printf("%X: Got command 0x66. Song isn't looped, restarting song from beginning.\n");
+                curr_ofs = startOffset;
+            } else {
+                printf("%X: Got command 0x66. Looping back to offset 0x%X.\n", curr_ofs, loopOffset);
+                curr_ofs = loopOffset;
+            }
             break;
         }
 
         //OPM
         case 0x54: { //YM2151
-            byte regi = file->readByte();
-            byte data = file->readByte();
+            byte regi = vgm_data[curr_ofs++];
+            byte data = vgm_data[curr_ofs++];
 
             //register
             opm->write(0, regi);
@@ -272,7 +221,7 @@ void VgmParser::tick() {
         case 0x5D: //YMZ280B
         case 0x52: //YM2612 port 0
         case 0x53: { //YM2612 port 1
-            file->skip(1);
+            curr_ofs++;
             break;
         }
 
@@ -282,7 +231,7 @@ void VgmParser::tick() {
             break;
         }
         case 0xE0: { //seek to offset in PCM data bank
-            file->skip(3);
+            curr_ofs += 3;
             break;
         }
 
@@ -307,13 +256,13 @@ void VgmParser::tick() {
         }
 
         default: {
-            printf("%X: Encountered unknown command %X. Ignoring.\n", file->getPos(), curByte);
+            printf("%X: Encountered unknown command %X. Ignoring.\n", curr_ofs, curByte);
             break;
         }
     }
 
-    if (file->getPos() == music_length) {
-        file->seek(startOffset);
+    if (curr_ofs == music_length) {
+        curr_ofs = startOffset;
         printf("Reached end of song. Looping.\n");
     }
 

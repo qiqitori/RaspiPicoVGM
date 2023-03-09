@@ -6,6 +6,7 @@ class OpmChip {
         DataBus bus;
 
     public:
+        // setAddr actually just sets a0 to indicate that an address will soon follow on the data bus
         void setAddr(byte addr) {
             //TODO: consolidate address line stuff and abstract with an address bus class
             gpio_put(PIN_FM_A0, addr & BIT(0));
@@ -35,9 +36,9 @@ class OpmChip {
 
         //Initialize the OPM chip itself
         void chipInit() {
-            gpio_put(PIN_FM_IC, GPIO_OFF);
-            busy_wait_ms(10); //TODO: double check datasheet
             gpio_put(PIN_FM_IC, GPIO_ON);
+            busy_wait_ms(10); //TODO: double check datasheet
+            gpio_put(PIN_FM_IC, GPIO_OFF);
             busy_wait_us_32(OPM_WRITE_PULSE_US);
         }
 
